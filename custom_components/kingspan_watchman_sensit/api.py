@@ -51,33 +51,75 @@ class SENSiTApiClient:
         self._username = username
         self._password = password
         self._usage_window = usage_window
+        self._last_good_data: list[TankData] | None = None  # cache last successful result
         if debug:
             _LOGGER.debug("Enabling Zeep service debug")
             zeep_logger = logging.getLogger("zeep")
             zeep_logger.setLevel(logging.DEBUG)
 
-    async def async_get_data(self) -> list[TankData]:
-        """Get tank data from the API"""
+     async def async_get_data(self) -> list[TankData]:
+        """Get tank data from the API.
+
+        On error, if we have previous good data, return that instead of raising,
+        so Home Assistant does not mark the entities as unavailable.
+        """
         try:
             async with timeout(API_TIMEOUT):
-                return await self._get_tank_data()
+                data = await self._get_tank_data()
+
         except APIError as e:
             msg = f"API error fetching data for {self._username}: {e}"
             _LOGGER.error(msg)
+            if self._last_good_data is not None:
+                _LOGGER.debug(
+                    "Returning last known good data for %s after APIError",
+                    self._username,
+                )
+                return self._last_good_data
+            # No previous good data, so we have to fail hard
             raise APIError(msg) from e
+
         except TimeoutError:
             msg = f"Timeout error fetching data for {self._username}"
             _LOGGER.error(msg)
+            if self._last_good_data is not None:
+                _LOGGER.debug(
+                    "Returning last known good data for %s after TimeoutError",
+                    self._username,
+                )
+                return self._last_good_data
             raise APIError(msg) from None
+
         except httpxTimeoutException:
             msg = f"HTTPX timeout error fetching data for {self._username}"
             _LOGGER.error(msg)
+            if self._last_good_data is not None:
+                _LOGGER.debug(
+                    "Returning last known good data for %s after HTTPX timeout",
+                    self._username,
+                )
+                return self._last_good_data
             raise APIError(msg) from None
+
         except Exception as e:  # pylint: disable=broad-except
             tb_str = "".join(traceback.format_tb(e.__traceback__))
-            msg = f"Unhandled error fetching data for {self._username}: '{e}' from {tb_str}"
+            msg = (
+                f"Unhandled error fetching data for {self._username}: "
+                f"'{e}' from {tb_str}"
+            )
             _LOGGER.error(msg)
+            if self._last_good_data is not None:
+                _LOGGER.debug(
+                    "Returning last known good data for %s after unhandled error",
+                    self._username,
+                )
+                return self._last_good_data
             raise APIError(msg) from e
+
+        # Only reached if no exception occurred
+        self._last_good_data = data
+        return data
+
 
     async def check_credentials(self) -> bool:
         """Login to check credentials"""
