@@ -44,24 +44,28 @@ class SENSiTApiClient:
         username: str,
         password: str,
         usage_window: int = DEFAULT_USAGE_WINDOW,
-        debug=False,
+        debug: bool = False,
     ) -> None:
-        """Simple API Client for ."""
+        """Simple API Client for Kingspan Watchman SENSiT."""
         _LOGGER.debug("API init as username=%s", username)
         self._username = username
         self._password = password
         self._usage_window = usage_window
-        self._last_good_data: list[TankData] | None = None  # cache last successful result
+        # Cache of last successfully fetched tank data so we can return it
+        # when the API has transient errors instead of making entities unavailable.
+        self._last_good_data: list[TankData] | None = None
+
         if debug:
             _LOGGER.debug("Enabling Zeep service debug")
             zeep_logger = logging.getLogger("zeep")
             zeep_logger.setLevel(logging.DEBUG)
 
-     async def async_get_data(self) -> list[TankData]:
+    async def async_get_data(self) -> list[TankData]:
         """Get tank data from the API.
 
-        On error, if we have previous good data, return that instead of raising,
-        so Home Assistant does not mark the entities as unavailable.
+        On error:
+        - If we have previous good data, return that instead of raising.
+        - If we have never succeeded, raise APIError so HA can show a real failure.
         """
         try:
             async with timeout(API_TIMEOUT):
@@ -76,7 +80,6 @@ class SENSiTApiClient:
                     self._username,
                 )
                 return self._last_good_data
-            # No previous good data, so we have to fail hard
             raise APIError(msg) from e
 
         except TimeoutError:
@@ -120,9 +123,8 @@ class SENSiTApiClient:
         self._last_good_data = data
         return data
 
-
     async def check_credentials(self) -> bool:
-        """Login to check credentials"""
+        """Login to check credentials."""
         try:
             async with timeout(API_TIMEOUT):
                 async with AsyncSensorClient() as client:
@@ -151,7 +153,7 @@ class SENSiTApiClient:
         async with AsyncSensorClient() as client:
             await client.login(self._username, self._password)
             tanks = await client.tanks
-            self.data = []
+            self.data: list[TankData] = []
             for tank in tanks:
                 tank_data = TankData()
                 tank_data.level = await tank.level
@@ -182,16 +184,19 @@ class SENSiTApiClient:
                 self.data.append(tank_data)
             return self.data
 
-    def usage_rate(self, tank_data: TankData):
+    def usage_rate(self, tank_data: TankData) -> float:
         history = filter_history(tank_data.history, self._usage_window)
         if len(history) == 0:
             return 0
 
-        delta_levels = []
+        delta_levels: list[float] = []
         current_level = history[0]["level_litres"]
         for _, row in enumerate(history[1:]):
             # Ignore refill days where oil goes up significantly
-            if current_level != 0 and (row["level_litres"] / current_level) < REFILL_THRESHOLD:
+            if (
+                current_level != 0
+                and (row["level_litres"] / current_level) < REFILL_THRESHOLD
+            ):
                 delta_levels.append(current_level - row["level_litres"])
 
             current_level = row["level_litres"]
@@ -201,7 +206,7 @@ class SENSiTApiClient:
         else:  # pragma: no cover
             return 0
 
-    def forecast_empty(self, tank_data: TankData):
+    def forecast_empty(self, tank_data: TankData) -> int:
         history = filter_history(tank_data.history, self._usage_window)
         if len(history) == 0:
             return 0
@@ -215,10 +220,13 @@ class SENSiTApiClient:
             return int(current_level / abs(rate))
 
 
-def filter_history(history: list[dict], usage_window) -> list[dict]:
-    """Filter tank history to a smaller recent window of days"""
+def filter_history(history: list[dict], usage_window: int) -> list[dict]:
+    """Filter tank history to a smaller recent window of days."""
     time_delta = as_local(datetime.today() - timedelta(days=usage_window))
     # API returns naive datetime rather than with timezones
-    history = [dict(x, reading_date=as_local(x["reading_date"])) for x in history]
+    history = [
+        dict(x, reading_date=as_local(x["reading_date"]))
+        for x in history
+    ]
     history = [x for x in history if x["reading_date"] >= time_delta]
     return history
